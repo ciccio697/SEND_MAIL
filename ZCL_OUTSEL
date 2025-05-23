@@ -1,0 +1,878 @@
+class ZCL_OUTSEL definition
+  public
+  final
+  create public .
+
+public section.
+
+  methods CONSTRUCTOR
+    importing
+      !IV_NAST type NAST .
+  methods EXECUTE
+    exporting
+      !EV_RETCODE type SY-SUBRC .
+protected section.
+private section.
+
+  types:
+    BEGIN OF ts_key,
+           zecdoc    TYPE zecdoc,
+           zecform   TYPE zecform,
+           zecmetodo TYPE zecmetodo.
+  TYPES: END OF ts_key .
+
+  data GV_KUNNR type KUNNR .
+  data GS_NAST type NAST .
+  data:
+    gt_routine TYPE STANDARD TABLE OF zbp_selroutine .
+  data:
+    gt_flow    TYPE STANDARD TABLE OF zbp_eancomm .
+  data:
+    gt_addr    TYPE STANDARD TABLE OF zbp_address .
+  data:
+    gt_mail    TYPE STANDARD TABLE OF zcds_altmail .
+
+  methods COMMIT .
+  methods GET_SENDER
+    importing
+      !IV_UNAME type SY-UNAME
+    returning
+      value(R_SENDER) type ref to IF_SENDER_BCS .
+  methods IS_AG_MAIL
+    importing
+      !IV_MAIL type ZEMAIL_USER
+    returning
+      value(R_RETCODE) type FLAG .
+  methods CHECK_FLOW .
+  methods GET_FNAME
+    importing
+      !IV_ZECFORM type ZECFORM
+    returning
+      value(R_FNAME) type STRING .
+  methods OPEN_LOG .
+  methods GET_BODY_MAIL
+    importing
+      !IV_TEXT type TDOBNAME
+      !IV_LANGU type SY-LANGU optional
+    returning
+      value(R_TXT) type BCSY_TEXT .
+  methods GET_KUNNR
+    importing
+      !IV_OBJKY type NA_OBJKEY
+      !IV_DOC type ZECDOC
+      !IV_ORD type /PLMPCV/UIF_SEQUENCE_NR
+    returning
+      value(R_KUNNR) type KUNNR .
+  methods SET_MSG
+    importing
+      !IV_TXT type ANY optional
+      !IV_ID type SYMSGID optional
+      !IV_NUMBER type SYMSGNO optional
+      !IV_V1 type SYMSGV optional
+      !IV_V2 type SYMSGV optional
+      !IV_V3 type SYMSGV optional
+      !IV_V4 type SYMSGV optional
+      !IV_KEY type TS_KEY .
+  methods GET_WB_INPUT
+    importing
+      !IV_ADDR type ZBP_ADDRESS
+      !IV_FILE type XSTRING
+    returning
+      value(R_INPUT) type ZPR_MT_REQ_MAIL_FILE_SEND
+    exceptions
+      ERROR .
+  methods GET_MAIL
+    importing
+      !IV_ADDR type ZBP_ADDRESS
+    returning
+      value(R_MAIL) type STRING_T
+    exceptions
+      NO_MAIL .
+  methods INIT_MSG
+    importing
+      !IV_VBELN type VBELN .
+  methods CHECK_MAIL
+    returning
+      value(R_RETCODE) type SY-SUBRC .
+  methods SEND_MAIL
+    importing
+      !IV_FILE type XSTRING
+      !IV_ADDR type ZBP_ADDRESS
+    exceptions
+      SEND_MAIL .
+  methods GET_OBJ_MAIL
+    importing
+      !IV_VBELN type VBELN
+      !IV_ZECDOC type ZECDOC
+      !IV_LANGU type SPRAS
+    returning
+      value(R_OBJ) type SO_OBJ_DES .
+ENDCLASS.
+
+
+
+CLASS ZCL_OUTSEL IMPLEMENTATION.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->CHECK_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [<-()] R_RETCODE                      TYPE        SY-SUBRC
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD check_mail.
+
+    DATA: lt_mail  TYPE string_t,
+          ls_key   TYPE ts_key,
+          lv_tabix TYPE sy-tabix.
+    LOOP AT gt_flow INTO DATA(ls_flow) WHERE zecmetodo CA 'M'.
+      lv_tabix = sy-tabix.
+      REFRESH lt_mail.
+      LOOP AT gt_addr INTO DATA(ls_addr) WHERE zecdoc = ls_flow-zecdoc
+                                            AND zecform = ls_flow-zecform
+                                            AND zecmetodo = ls_flow-zecmetodo.
+        MOVE-CORRESPONDING ls_addr TO ls_key.
+        me->get_mail(
+        EXPORTING
+          iv_addr =  ls_addr
+        RECEIVING
+          r_mail  =  lt_mail
+        EXCEPTIONS
+          no_mail = 1
+          OTHERS  = 2
+          ).
+        IF sy-subrc <> 0.
+
+        ENDIF.
+      ENDLOOP.
+      IF lt_mail IS INITIAL.
+        MOVE-CORRESPONDING ls_flow to ls_key.
+        me->set_msg(  iv_id = 'EHPRC_CPM_TASK'  iv_number = '156' iv_key = ls_key ).
+        DELETE gt_flow INDEX lv_tabix.
+        r_retcode = 1.
+      ENDIF.
+    ENDLOOP.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_OUTSEL->CONSTRUCTOR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_NAST                        TYPE        NAST
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD constructor.
+    DATA: lt_key TYPE STANDARD TABLE OF ts_key,
+          lv_ord TYPE /plmpcv/uif_sequence_nr.
+    REFRESH: gt_flow.
+    CLEAR: gv_kunnr,
+            gs_nast.
+
+    gs_nast = iv_nast.
+* recupero log
+
+    SELECT *
+    FROM zbp_logerrsend
+    INTO CORRESPONDING FIELDS OF TABLE @lt_key
+    WHERE vbeln = @gs_nast-objky.
+    IF sy-subrc = 0.
+      me->init_msg( iv_vbeln = gs_nast-objky(10) ).
+    ENDIF.
+
+    SELECT SINGLE zecdoc
+    FROM zbp_eancomm_doc
+    INTO @DATA(lv_doc)
+    WHERE kschl = @gs_nast-kschl.
+
+    IF sy-subrc = 0.
+      WHILE gt_mail IS INITIAL.
+        lv_ord += 1.
+        gv_kunnr = me->get_kunnr( iv_objky = gs_nast-objky
+                                    iv_doc = lv_doc
+                                     iv_ord = lv_ord ).
+        IF gv_kunnr IS INITIAL.
+          EXIT.
+        ENDIF.
+        IF lt_key IS INITIAL.
+          SELECT *
+          FROM zbp_eancomm
+          INTO TABLE gt_flow
+          WHERE partner = gv_kunnr
+          AND zecdoc = lv_doc.
+        ELSE.
+          SELECT *
+          FROM zbp_eancomm
+          INTO TABLE gt_flow
+          FOR ALL ENTRIES IN lt_key
+          WHERE partner = gv_kunnr
+          AND zecdoc = lv_doc
+          AND zecform = lt_key-zecform
+          AND zecmetodo = lt_key-zecmetodo.
+        ENDIF.
+        IF sy-subrc = 0.
+          DELETE gt_flow WHERE zecform = 'E'."non viene più gestito
+          SELECT *
+          FROM zbp_selroutine
+          INTO TABLE gt_routine
+          FOR ALL ENTRIES IN gt_flow
+          WHERE zecdoc = gt_flow-zecdoc
+            AND zecform = gt_flow-zecform.
+          IF sy-subrc = 0.
+            SELECT *
+              FROM zbp_address
+              INTO TABLE gt_addr
+              FOR ALL ENTRIES IN gt_flow
+              WHERE zecdoc = gt_flow-zecdoc
+               AND zecform = gt_flow-zecform.
+            IF sy-subrc = 0.
+              SELECT *
+                FROM zcds_altmail
+                INTO TABLE gt_mail
+                FOR ALL ENTRIES IN gt_addr
+                WHERE partner = gv_kunnr
+                  AND adr_kind = gt_addr-adr_kind1.
+
+              SELECT *
+              FROM zcds_altmail
+              APPENDING TABLE gt_mail
+              FOR ALL ENTRIES IN gt_addr
+              WHERE partner = gv_kunnr
+              AND adr_kind = gt_addr-adr_kind2.
+
+            ENDIF.
+          ENDIF.
+        ENDIF.
+      ENDWHILE.
+    ENDIF.
+
+
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Public Method ZCL_OUTSEL->EXECUTE
+* +-------------------------------------------------------------------------------------------------+
+* | [<---] EV_RETCODE                     TYPE        SY-SUBRC
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD execute.
+    DATA: lv_file   TYPE xstring,
+          ls_key    TYPE ts_key,
+          lr_nometh TYPE RANGE OF zecmetodo,
+          ls_input  TYPE zpr_mt_req_mail_file_send,
+          lv_save   TYPE c.
+    DATA(ol_send) = NEW zpr_co_sc_0037mail_file_send_a( ).
+
+    CLEAR ev_retcode.
+
+    ev_retcode = me->check_mail( ).
+    me->check_flow( ).
+
+
+    LOOP AT gt_flow INTO DATA(ls_flow).
+      READ TABLE gt_routine INTO DATA(ls_rou) WITH KEY zecdoc = ls_flow-zecdoc
+                                                       zecform = ls_flow-zecform.
+      CHECK sy-subrc = 0.
+
+      LOOP AT gt_addr INTO DATA(ls_addr) WHERE zecdoc = ls_flow-zecdoc
+                                           AND zecform = ls_flow-zecform
+                                           AND zecmetodo = ls_flow-zecmetodo.
+        MOVE-CORRESPONDING ls_addr TO ls_key.
+*********** recupero informazioni*************
+        IF ls_rou-perform_data IS NOT INITIAL.
+          PERFORM (ls_rou-perform_data) IN PROGRAM (ls_rou-progname) IF FOUND USING gs_nast ls_addr-kschl  CHANGING lv_file.
+        ENDIF.
+        IF lv_file IS INITIAL.
+          me->set_msg( iv_id = '/CCEE/CL_XX_FI_MASK' iv_number = '008' iv_key = ls_key ).
+          ev_retcode = 1.
+          CONTINUE.
+        ENDIF.
+        IF ls_flow-zecform = 'E'."se eancom non deve inviare nulla
+          CONTINUE.
+        ENDIF.
+******************invia***********************
+        IF ls_addr-zecmetodo CA 'M'.
+
+          me->send_mail(
+          EXPORTING
+          iv_addr = ls_addr
+          iv_file   = lv_file
+             EXCEPTIONS
+              send_mail = 1
+              OTHERS    = 2
+            ).
+          IF sy-subrc <> 0.
+            me->set_msg( iv_id = sy-msgid iv_number = sy-msgno iv_key = ls_key ).
+            ev_retcode = 1.
+            CONTINUE.
+          ENDIF.
+        ENDIF.
+
+        IF ls_addr-zecmetodo CA 'F'.
+
+          me->get_wb_input(
+          EXPORTING
+            iv_addr = ls_addr
+            iv_file = lv_file
+            RECEIVING
+            r_input = ls_input
+          EXCEPTIONS
+            error   = 1
+            OTHERS  = 2
+            ).
+          IF sy-subrc <> 0.
+            CONTINUE.
+          ENDIF.
+
+          TRY.
+              ol_send->execute( input = ls_input ).
+            CATCH cx_ai_system_fault INTO DATA(ol_err). " Communication Error
+              me->set_msg( iv_txt = ol_err->get_text( )   iv_key = ls_key  ).
+              ev_retcode = 1.
+          ENDTRY.
+
+          me->commit( ).
+        ENDIF.
+
+      ENDLOOP.
+    ENDLOOP.
+
+    IF ev_retcode NE 0.
+      me->open_log( ).
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_BODY_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TEXT                        TYPE        TDOBNAME
+* | [--->] IV_LANGU                       TYPE        SY-LANGU(optional)
+* | [<-()] R_TXT                          TYPE        BCSY_TEXT
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_body_mail.
+    DATA: lv_langu TYPE thead-tdspras,
+          lt_line  TYPE STANDARD TABLE OF tline.
+    CLEAR r_txt.
+    lv_langu = COND #( WHEN iv_langu IS INITIAL THEN gs_nast-spras ELSE iv_langu ).
+    CALL FUNCTION 'READ_TEXT'
+      EXPORTING
+        client                  = sy-mandt
+        id                      = 'ST'
+        language                = lv_langu
+        name                    = iv_text
+        object                  = 'TEXT'
+      TABLES
+        lines                   = lt_line
+      EXCEPTIONS
+        id                      = 1
+        language                = 2
+        name                    = 3
+        not_found               = 4
+        object                  = 5
+        reference_check         = 6
+        wrong_access_to_archive = 7
+        OTHERS                  = 8.
+    IF sy-subrc <> 0.
+* Implement suitable error handling here
+    ENDIF.
+
+    LOOP AT lt_line INTO DATA(ls_line).
+      APPEND INITIAL LINE TO r_txt ASSIGNING FIELD-SYMBOL(<line>).
+      <line> = ls_line-tdline .
+    ENDLOOP.
+
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_FNAME
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_ZECFORM                     TYPE        ZECFORM
+* | [<-()] R_FNAME                        TYPE        STRING
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_fname.
+    SELECT SINGLE  ext
+    INTO @DATA(lv_form)
+          FROM zbp_eancomm_for
+          WHERE zecform = @IV_ZECFORM.
+    IF sy-subrc = 0.
+      r_fname = |DOC_{ gs_nast-objky ALPHA = OUT  }.{ to_lower( lv_form ) }|.
+      CONDENSE r_fname NO-GAPS.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_KUNNR
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_OBJKY                       TYPE        NA_OBJKEY
+* | [--->] IV_DOC                         TYPE        ZECDOC
+* | [--->] IV_ORD                         TYPE        /PLMPCV/UIF_SEQUENCE_NR
+* | [<-()] R_KUNNR                        TYPE        KUNNR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_kunnr.
+
+    CLEAR:r_kunnr.
+
+    SELECT SINGLE *
+      FROM zbp_selout
+      INTO  @DATA(ls_part)
+      WHERE zecdoc = @iv_doc
+        AND ord = @iv_ord
+      .
+    CHECK sy-subrc = 0.
+
+    SELECT SINGLE (ls_part-keyfield)
+      FROM vbpa
+      INTO r_kunnr
+      WHERE posnr = ls_part-posnr
+        AND vbeln = iv_objky
+        AND parvw = ls_part-parvw.
+
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_ADDR                        TYPE        ZBP_ADDRESS
+* | [<-()] R_MAIL                         TYPE        STRING_T
+* | [EXC!] NO_MAIL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_mail.
+    CLEAR r_mail.
+
+    IF iv_addr-zecdoc = 'C'.
+
+      SELECT SINGLE zzmail_user
+        FROM vbak
+        INTO @DATA(lv_mail)
+        WHERE vbeln = @gs_nast-objky
+          AND zzmail_user NE @space.
+      IF sy-subrc = 0.
+        IF me->is_ag_mail( lv_mail  ).
+          IF NOT line_exists( gt_mail[ smtp_addr = lv_mail ] ) AND iv_addr-adr_kind1 = 'SEND_CO'.
+            APPEND INITIAL LINE TO r_mail ASSIGNING FIELD-SYMBOL(<mail>).
+            <mail> = lv_mail.
+          ENDIF.
+        ELSE.
+          IF NOT line_exists( gt_mail[ smtp_addr = lv_mail ] ) AND iv_addr-adr_kind1 = 'SEND_CS'.
+            APPEND INITIAL LINE TO r_mail ASSIGNING <mail>.
+            <mail> = lv_mail.
+          ENDIF.
+        ENDIF.
+      ENDIF.
+    ENDIF.
+
+
+    LOOP AT gt_mail INTO DATA(ls_mail) WHERE adr_kind = iv_addr-adr_kind1.
+      APPEND INITIAL LINE TO r_mail ASSIGNING <mail>.
+      <mail> = ls_mail-smtp_addr.
+    ENDLOOP.
+    IF sy-subrc NE 0.
+
+      LOOP AT gt_mail INTO ls_mail WHERE adr_kind = iv_addr-adr_kind2.
+        APPEND INITIAL LINE TO r_mail ASSIGNING <mail>.
+        <mail> = ls_mail-smtp_addr.
+      ENDLOOP.
+
+    ENDIF.
+
+    IF r_mail IS INITIAL.
+      MESSAGE e156(ehprc_cpm_task) RAISING no_mail.
+    ENDIF.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_WB_INPUT
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_ADDR                        TYPE        ZBP_ADDRESS
+* | [--->] IV_FILE                        TYPE        XSTRING
+* | [<-()] R_INPUT                        TYPE        ZPR_MT_REQ_MAIL_FILE_SEND
+* | [EXC!] ERROR
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_wb_input.
+    CLEAR  r_input.
+    r_input-mt_req_mail_file_send-idservice = |BS_{ sy-sysid }_{ sy-mandt }/SC_0037MailFileSend_async|.
+    APPEND INITIAL LINE TO r_input-mt_req_mail_file_send-message
+    ASSIGNING FIELD-SYMBOL(<msg>).
+    <msg>-partner = gv_kunnr.
+*    <msg>- = gv_kunnr.
+
+    APPEND INITIAL LINE TO <msg>-attachment ASSIGNING FIELD-SYMBOL(<atc>).
+    <atc>-filename = me->get_fname( iv_zecform = iv_addr-zecform  ).
+
+    CALL FUNCTION 'SCMS_BASE64_ENCODE_STR'
+      EXPORTING
+        input  = iv_file
+      IMPORTING
+        output = <atc>-b64string.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->INIT_MSG
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VBELN                       TYPE        VBELN
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD init_msg.
+    DELETE FROM zbp_logerrsend WHERE vbeln = iv_vbeln.
+    COMMIT WORK AND WAIT.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->OPEN_LOG
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD open_log.
+    DATA: lt_log  TYPE STANDARD TABLE OF zbp_logerrsend,
+          lt_vlog TYPE STANDARD TABLE OF zbp_selout_log,
+          o_alv   TYPE REF TO cl_salv_table.
+    SELECT *
+      FROM zbp_logerrsend
+      INTO TABLE lt_log
+      WHERE vbeln = gs_nast-objky(10).
+
+    LOOP AT gt_flow INTO DATA(ls_flow).
+      APPEND INITIAL LINE TO lt_vlog ASSIGNING FIELD-SYMBOL(<log>).
+      MOVE-CORRESPONDING ls_flow TO <log>.
+      PERFORM get_text_for_value IN PROGRAM saplzbp01 USING <log>-zecdoc 'ZECDOC'
+      CHANGING <log>-zecdoc_t IF FOUND.
+      PERFORM get_text_for_value IN PROGRAM saplzbp01 USING <log>-zecform 'ZECFORM'
+      CHANGING <log>-zecform_t IF FOUND.
+      PERFORM get_text_for_value IN PROGRAM saplzbp01 USING <log>-zecmetodo 'ZECMETODO'
+      CHANGING <log>-zecmetodo_t IF FOUND.
+      <log>-ris = '@08@'.
+
+      TRY.
+          <log>-msg = lt_log[ zecdoc = ls_flow-zecdoc  zecform = ls_flow-zecform zecmetodo = ls_flow-zecmetodo ]-msg.
+          <log>-ris = '@0A@'.
+        CATCH cx_root.
+
+      ENDTRY.
+
+    ENDLOOP.
+    CHECK lt_vlog IS NOT INITIAL.
+
+    TRY.
+        cl_salv_table=>factory(
+        IMPORTING
+          r_salv_table = o_alv
+        CHANGING
+          t_table      = lt_vlog[] ).
+
+      CATCH cx_salv_msg.
+
+    ENDTRY.
+    CHECK o_alv IS BOUND.
+
+    o_alv->get_functions( )->set_all( 'X' ).
+    o_alv->get_columns( )->set_optimize( 'X' ).
+  o_alv->get_columns( )->get_column(  columnname = 'RIS'  )->set_output_length( VALUE = '4' )..
+*  CATCH cx_salv_not_found. " ALV: General Error Class (Checked in Syntax Check)
+    o_alv->get_display_settings( )->set_striped_pattern( if_salv_c_bool_sap=>true ).
+
+    o_alv->set_screen_popup(
+    start_column = 10
+    end_column  = 150
+    start_line  = 1
+    end_line    = 20 ).
+
+    o_alv->display( ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->SEND_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_FILE                        TYPE        XSTRING
+* | [--->] IV_ADDR                        TYPE        ZBP_ADDRESS
+* | [EXC!] SEND_MAIL
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD send_mail.
+
+    DATA: lo_send_request TYPE REF TO cl_bcs,  " Oggetto email
+          lo_document     TYPE REF TO cl_document_bcs, " Documento email
+          lo_sender       TYPE REF TO if_sender_bcs, " Mittente email
+          lo_recipient    TYPE REF TO if_recipient_bcs, " Destinatario email
+          lt_text         TYPE bcsy_text, " Corpo dell'email
+          lt_bin_content  TYPE solix_tab,
+          lv_exetions     TYPE soodk-objtp,
+          lv_mail         TYPE ad_smtpadr,
+          lv_attsubject   TYPE sood-objdes,
+          lv_len          TYPE i,
+          lv_OBJLEN       TYPE  sood-objlen,
+          lv_subj         TYPE so_obj_des.
+
+
+    " Creazione dell'oggetto email
+    lo_send_request = cl_bcs=>create_persistent( ).
+
+    lt_text = me->get_body_mail(
+    EXPORTING
+    iv_text  =  iv_addr-tdname
+    iv_langu = gs_nast-spras  ).
+
+    lv_subj = me->get_obj_mail(
+    iv_vbeln  =  gs_nast-objky(10)            " Numero del documento commerciale
+    iv_zecdoc =  iv_addr-zecdoc          " Tipo Documento
+    iv_langu = gs_nast-spras
+    ).
+    " Creazione del documento email
+    lo_document = cl_document_bcs=>create_document(
+    EXPORTING
+      i_type    = 'HTM'
+      i_text    = lt_text
+      i_subject = lv_subj ).
+    " Assegna il documento all'email
+    lo_send_request->set_document( lo_document ).
+
+    CALL FUNCTION 'SCMS_XSTRING_TO_BINARY'
+      EXPORTING
+        buffer        = iv_file
+      IMPORTING
+        output_length = lv_len
+      TABLES
+        binary_tab    = lt_bin_content.
+
+    lv_OBJLEN = lv_len.
+    CONDENSE lv_OBJLEN NO-GAPS.
+    TRY.
+        lv_attsubject = me->get_fname( iv_zecform = iv_addr-zecform ).
+        SPLIT lv_attsubject AT '.' INTO TABLE DATA(lt_ext).
+        lv_exetions = to_upper( lt_ext[ 2 ] ).
+        lo_document->add_attachment(
+        EXPORTING
+          i_attachment_type    = lv_exetions
+          i_attachment_size = lv_OBJLEN
+          i_attachment_subject = lv_attsubject
+          i_att_content_hex    = lt_bin_content ).
+      CATCH cx_document_bcs.
+
+    ENDTRY.
+
+    " Impostazione del mittente
+    TRY.
+        lo_sender = me->get_sender( gs_nast-usnam ).
+        lo_send_request->set_sender( lo_sender ).
+      CATCH cx_address_bcs.
+
+    ENDTRY.
+
+    me->get_mail(
+    EXPORTING
+      iv_addr =  iv_addr                " Indirizzi per Invio file
+    RECEIVING
+      r_mail  =   DATA(lt_mail)               " Character Type Table
+    EXCEPTIONS
+      no_mail = 1                " Nessuna mail trovata
+      OTHERS  = 2
+      ).
+    IF sy-subrc > 1.
+      MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+        WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4 RAISING send_mail.
+    ELSEIF sy-subrc = 1.
+      RETURN.
+    ENDIF.
+
+    CHECK lt_mail IS NOT INITIAL.
+    LOOP AT lt_mail INTO DATA(ls_mail).
+      TRY." Impostazione del destinatario
+          lv_mail = ls_mail.
+          lo_recipient = cl_cam_address_bcs=>create_internet_address( lv_mail ).
+          lo_send_request->add_recipient( lo_recipient ).
+        CATCH cx_send_req_bcs.
+          CONTINUE.
+      ENDTRY.
+    ENDLOOP.
+
+    " Impostazione dell'invio immediato
+    TRY.
+        lo_send_request->set_send_immediately( abap_true ).
+      CATCH cx_send_req_bcs.
+
+    ENDTRY.
+
+    TRY.
+        lo_send_request->send( i_with_error_screen = 'X' ).
+        me->commit( ).
+      CATCH cx_send_req_bcs.
+
+    ENDTRY.
+
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->SET_MSG
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_TXT                         TYPE        ANY(optional)
+* | [--->] IV_ID                          TYPE        SYMSGID(optional)
+* | [--->] IV_NUMBER                      TYPE        SYMSGNO(optional)
+* | [--->] IV_V1                          TYPE        SYMSGV(optional)
+* | [--->] IV_V2                          TYPE        SYMSGV(optional)
+* | [--->] IV_V3                          TYPE        SYMSGV(optional)
+* | [--->] IV_V4                          TYPE        SYMSGV(optional)
+* | [--->] IV_KEY                         TYPE        TS_KEY
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD set_msg.
+    DATA:ls_log TYPE zbp_logerrsend.
+    IF iv_txt IS INITIAL.
+      MESSAGE ID iv_id TYPE 'I' NUMBER iv_number
+      WITH iv_v1 iv_v2 iv_v3 iv_v4 INTO ls_log-msg .
+    ELSE.
+      ls_log = iv_txt.
+    ENDIF.
+    MOVE-CORRESPONDING iv_key TO ls_log.
+    ls_log-vbeln = gs_nast-objky.
+    ls_log-lastsend_user = sy-uname.
+    ls_log-lastsend_time = sy-timlo.
+    ls_log-lastsend_date = sy-datum.
+    MODIFY zbp_logerrsend FROM ls_log.
+    me->commit( ).
+*    commit WORK AND WAIT.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->CHECK_FLOW
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD check_flow.
+
+
+
+
+    IF gs_nast-kschl = 'ZSOF'.
+      SELECT SINGLE *
+        FROM vbak
+        INTO @DATA(ls_vbak)
+        WHERE vbeln = @gs_nast-objky(10)
+          AND auart = 'Z001'
+          AND bsark = @space.
+      IF sy-subrc = 0.
+        DELETE gt_flow WHERE zecmetodo CA 'M'.
+      ENDIF.
+    ENDIF.
+
+    SELECT SINGLE *
+    FROM vbak
+    INTO ls_vbak
+    WHERE vbeln = gs_nast-objky(10)
+    AND auart = 'ZORD'.
+    IF sy-subrc = 0.
+      REFRESH gt_flow.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_OBJ_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_VBELN                       TYPE        VBELN
+* | [--->] IV_ZECDOC                      TYPE        ZECDOC
+* | [--->] IV_LANGU                       TYPE        SPRAS
+* | [<-()] R_OBJ                          TYPE        SO_OBJ_DES
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_obj_mail.
+
+    DATA: lv_doc TYPE char10.
+
+
+    CASE iv_zecdoc.
+      WHEN 'D'.
+        SELECT SINGLE xabln
+        FROM likp
+        INTO lv_doc
+        WHERE Vbeln = iv_vbeln.
+      WHEN 'F'.
+        SELECT SINGLE belnr
+        FROM vbrk
+        INTO lv_doc
+        WHERE Vbeln = iv_vbeln.
+    ENDCASE.
+    IF lv_doc IS INITIAL.
+      lv_doc = iv_vbeln.
+    ENDIF.
+
+
+
+    SELECT SINGLE bezei
+         FROM zbp_objmail
+         INTO r_obj
+       WHERE zecdoc = iv_zecdoc
+       AND spras = gs_nast-spras.
+    IF sy-subrc = 0.
+      r_obj = |{ r_obj } { lv_doc ALPHA = OUT }|.
+    ELSE.
+      r_obj = |{ lv_doc ALPHA = OUT }|.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->GET_SENDER
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_UNAME                       TYPE        SY-UNAME
+* | [<-()] R_SENDER                       TYPE REF TO IF_SENDER_BCS
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD get_sender.
+    DATA:lv_mail TYPE adr6-smtp_addr.
+*    SELECT SINGLE m~smtp_addr
+*      FROM usr21 AS u
+*      INNER JOIN adr6 AS m ON m~persnumber = u~persnumber
+*                          AND m~addrnumber = u~addrnumber
+*      INTO @DATA(lv_mail)
+*      WHERE m~flgdefault = @abap_true
+*        AND  u~bname = @iv_uname.
+*      IF sy-subrc NE 0.
+    lv_mail = 'noreply@selectra.it'.
+*      ENDIF.
+    r_sender = cl_cam_address_bcs=>create_internet_address( lv_mail ).
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->IS_AG_MAIL
+* +-------------------------------------------------------------------------------------------------+
+* | [--->] IV_MAIL                        TYPE        ZEMAIL_USER
+* | [<-()] R_RETCODE                      TYPE        FLAG
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD is_ag_mail.
+    DATA:lv_mail TYPE zcdsmail-u_smtp_addr,
+         ls_mail TYPE zcdsmail.
+
+    lv_mail = to_upper( iv_mail ).
+
+    CLEAR: r_retcode.
+
+    SELECT SINGLE *
+      FROM zcdsmail
+      INTO ls_mail
+      WHERE remark = 'VENDITA'
+      AND u_smtp_addr = lv_mail.
+    IF sy-subrc = 0.
+      r_retcode = abap_true.
+    ENDIF.
+  ENDMETHOD.
+
+
+* <SIGNATURE>---------------------------------------------------------------------------------------+
+* | Instance Private Method ZCL_OUTSEL->COMMIT
+* +-------------------------------------------------------------------------------------------------+
+* +--------------------------------------------------------------------------------------</SIGNATURE>
+  METHOD commit.
+    IF gs_nast-vsztp NE '4'.
+      COMMIT WORK AND WAIT.
+    ENDIF.
+  ENDMETHOD.
+ENDCLASS.
